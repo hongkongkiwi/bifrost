@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/bytedance/sonic"
 	schemas "github.com/maximhq/bifrost/core/schemas"
@@ -133,18 +134,37 @@ func prepareParams(params *schemas.ModelParameters) map[string]interface{} {
 // or times out based on its own settings. This function merely stops *waiting* for the
 // fasthttp call and returns an error related to the context.
 func makeRequestWithContext(ctx context.Context, client *fasthttp.Client, req *fasthttp.Request, resp *fasthttp.Response) *schemas.BifrostError {
+	// Use a buffered channel to prevent goroutine leaks
 	errChan := make(chan error, 1)
 
+	// Create a context-aware HTTP request
 	go func() {
-		// client.Do is a blocking call.
-		// It will send an error (or nil for success) to errChan when it completes.
-		errChan <- client.Do(req, resp)
+		defer func() {
+			// Recover from any panics in the HTTP client
+			if r := recover(); r != nil {
+				errChan <- fmt.Errorf("HTTP client panic: %v", r)
+			}
+		}()
+
+		// Make the HTTP request
+		err := client.Do(req, resp)
+
+		// Send result, but don't block if context is cancelled
+		select {
+		case errChan <- err:
+			// Successfully sent the result
+		case <-ctx.Done():
+			// Context was cancelled while we were trying to send result
+			// The main goroutine has already returned, so just exit
+			return
+		}
 	}()
 
 	select {
 	case <-ctx.Done():
 		// Context was cancelled (e.g., deadline exceeded or manual cancellation).
-		// Return a BifrostError indicating this.
+		// Note: The HTTP request goroutine might still be running, but it will detect
+		// context cancellation when trying to send to errChan and will exit gracefully.
 		return &schemas.BifrostError{
 			IsBifrostError: true,
 			Error: schemas.ErrorField{
@@ -715,4 +735,211 @@ func handleStreamControlSkip(logger schemas.Logger, bifrostErr *schemas.BifrostE
 		return true
 	}
 	return false
+}
+
+// Input validation patterns and constants
+var (
+	modelNamePattern        = regexp.MustCompile(`^[a-zA-Z0-9\-_./:]+$`)
+	sqlInjectionPattern     = regexp.MustCompile(`(?i)(union|select|insert|update|delete|drop|exec|script)`)
+	commandInjectionPattern = regexp.MustCompile(`[;&|]`)
+
+	maxModelNameLength = 256
+	maxMessageLength   = 1048576 // 1MB per message
+	maxMessagesCount   = 1000    // Max number of messages
+)
+
+// validateProviderInputs performs comprehensive input validation for provider methods
+func validateProviderInputs(model string, key schemas.Key, messages []schemas.BifrostMessage) error {
+	// Validate model name
+	if err := validateModelName(model); err != nil {
+		return err
+	}
+
+	// Validate API key
+	if err := validateAPIKey(key.Value); err != nil {
+		return err
+	}
+
+	// Validate messages
+	if err := validateMessages(messages); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateModelName validates AI model names
+func validateModelName(modelName string) error {
+	if modelName == "" {
+		return fmt.Errorf("model name cannot be empty")
+	}
+
+	if len(modelName) > maxModelNameLength {
+		return fmt.Errorf("model name too long: %d characters (max %d)", len(modelName), maxModelNameLength)
+	}
+
+	// Check for dangerous patterns
+	if commandInjectionPattern.MatchString(modelName) {
+		return fmt.Errorf("model name contains invalid characters")
+	}
+
+	if sqlInjectionPattern.MatchString(modelName) {
+		return fmt.Errorf("model name contains suspicious patterns")
+	}
+
+	// Ensure model name follows expected pattern
+	if !modelNamePattern.MatchString(modelName) {
+		return fmt.Errorf("model name contains invalid characters: must match [a-zA-Z0-9\\-_./:]+")
+	}
+
+	return nil
+}
+
+// validateAPIKey validates API key format and security
+func validateAPIKey(apiKey string) error {
+	if apiKey == "" {
+		return fmt.Errorf("API key cannot be empty")
+	}
+
+	// Check length constraints
+	if len(apiKey) < 5 {
+		return fmt.Errorf("API key too short: %d characters (minimum 5)", len(apiKey))
+	}
+
+	if len(apiKey) > 512 {
+		return fmt.Errorf("API key too long: %d characters (max 512)", len(apiKey))
+	}
+
+	// Check for suspicious patterns
+	if commandInjectionPattern.MatchString(apiKey) {
+		return fmt.Errorf("API key contains invalid characters")
+	}
+
+	// Ensure key contains only printable ASCII characters
+	for _, r := range apiKey {
+		if !unicode.IsPrint(r) || r > 126 {
+			return fmt.Errorf("API key contains non-printable characters")
+		}
+	}
+
+	return nil
+}
+
+// validateMessages validates the messages array for safety and constraints
+func validateMessages(messages []schemas.BifrostMessage) error {
+	if len(messages) == 0 {
+		return fmt.Errorf("messages cannot be empty")
+	}
+
+	if len(messages) > maxMessagesCount {
+		return fmt.Errorf("too many messages: %d (max %d)", len(messages), maxMessagesCount)
+	}
+
+	for i, msg := range messages {
+		if err := validateMessage(msg, i); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateMessage validates individual message content
+func validateMessage(msg schemas.BifrostMessage, index int) error {
+	// Validate role
+	if string(msg.Role) == "" {
+		return fmt.Errorf("message %d: role cannot be empty", index)
+	}
+
+	if !isValidRole(string(msg.Role)) {
+		return fmt.Errorf("message %d: invalid role '%s'", index, msg.Role)
+	}
+
+	// Validate content structure
+	if msg.Content.ContentStr == nil && msg.Content.ContentBlocks == nil {
+		return fmt.Errorf("message %d: content cannot be empty (both ContentStr and ContentBlocks are nil)", index)
+	}
+
+	// Validate string content if present
+	if msg.Content.ContentStr != nil {
+		if err := validateStringContent(*msg.Content.ContentStr, index); err != nil {
+			return err
+		}
+	}
+
+	// Validate content blocks if present
+	if msg.Content.ContentBlocks != nil {
+		if err := validateContentBlocks(*msg.Content.ContentBlocks, index); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateStringContent validates string-based message content
+func validateStringContent(content string, index int) error {
+	if len(content) > maxMessageLength {
+		return fmt.Errorf("message %d: content too long: %d bytes (max %d)", index, len(content), maxMessageLength)
+	}
+
+	// Check for dangerous patterns
+	if sqlInjectionPattern.MatchString(content) {
+		return fmt.Errorf("message %d: content contains suspicious patterns", index)
+	}
+
+	return nil
+}
+
+// validateContentBlocks validates content blocks (e.g., text + images)
+func validateContentBlocks(content []schemas.ContentBlock, index int) error {
+	if len(content) == 0 {
+		return fmt.Errorf("message %d: content blocks cannot be empty", index)
+	}
+
+	if len(content) > 100 { // Reasonable limit for content parts
+		return fmt.Errorf("message %d: too many content blocks: %d (max 100)", index, len(content))
+	}
+
+	for i, block := range content {
+		if err := validateContentBlock(block, index, i); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateContentBlock validates individual content block
+func validateContentBlock(block schemas.ContentBlock, messageIndex, blockIndex int) error {
+	// Check that at least one content type is specified
+	hasContent := false
+
+	if block.Text != nil && *block.Text != "" {
+		hasContent = true
+		if len(*block.Text) > maxMessageLength {
+			return fmt.Errorf("message %d, block %d: text content too long: %d bytes (max %d)",
+				messageIndex, blockIndex, len(*block.Text), maxMessageLength)
+		}
+	}
+
+	if block.ImageURL != nil {
+		hasContent = true
+		// Additional image validation could be added here
+		if block.ImageURL.URL == "" {
+			return fmt.Errorf("message %d, block %d: image URL cannot be empty", messageIndex, blockIndex)
+		}
+	}
+
+	if !hasContent {
+		return fmt.Errorf("message %d, block %d: content block cannot be empty", messageIndex, blockIndex)
+	}
+
+	return nil
+}
+
+// isValidRole checks if a role is one of the accepted values
+func isValidRole(role string) bool {
+	validRoles := []string{"system", "user", "assistant", "tool", "function"}
+	return slices.Contains(validRoles, role)
 }

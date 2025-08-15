@@ -5,8 +5,9 @@ package bifrost
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
-	"math/rand"
 	"slices"
 	"strings"
 	"sync"
@@ -96,7 +97,7 @@ const BifrostContextKeyRequestType BifrostContextKey = "bifrost-request-type"
 // Initial Memory Allocations happens here as per the initial pool size.
 func Init(config schemas.BifrostConfig) (*Bifrost, error) {
 	if config.Account == nil {
-		return nil, fmt.Errorf("account is required to initialize Bifrost")
+		return nil, NewConfigurationError("bifrost", "account is required to initialize Bifrost")
 	}
 
 	bifrost := &Bifrost{
@@ -132,8 +133,8 @@ func Init(config schemas.BifrostConfig) (*Bifrost, error) {
 	bifrost.pluginPipelinePool = sync.Pool{
 		New: func() interface{} {
 			return &PluginPipeline{
-				preHookErrors:  make([]error, 0),
-				postHookErrors: make([]error, 0),
+				preHookErrors:  make([]error, 0, 4), // Pre-allocate capacity to reduce allocations
+				postHookErrors: make([]error, 0, 4), // Pre-allocate capacity to reduce allocations
 			}
 		},
 	}
@@ -146,8 +147,8 @@ func Init(config schemas.BifrostConfig) (*Bifrost, error) {
 		bifrost.errorChannelPool.Put(make(chan schemas.BifrostError, 1))
 		bifrost.responseStreamPool.Put(make(chan chan *schemas.BifrostStream, 1))
 		bifrost.pluginPipelinePool.Put(&PluginPipeline{
-			preHookErrors:  make([]error, 0),
-			postHookErrors: make([]error, 0),
+			preHookErrors:  make([]error, 0, 4),
+			postHookErrors: make([]error, 0, 4),
 		})
 	}
 
@@ -322,12 +323,25 @@ func (bifrost *Bifrost) TranscriptionStreamRequest(ctx context.Context, req *sch
 // while the transition occurs. In-flight requests will complete before workers are stopped.
 // Buffered requests in the old queue will be transferred to the new queue to prevent loss.
 func (bifrost *Bifrost) UpdateProviderConcurrency(providerKey schemas.ModelProvider) error {
+	// Validate provider key
+	if err := DefaultValidator.ValidateProviderName(string(providerKey)); err != nil {
+		return NewProviderErrorf(providerKey, "", "provider_validation", "invalid provider key: %v", err)
+	}
+
 	bifrost.logger.Info(fmt.Sprintf("Updating concurrency configuration for provider %s", providerKey))
 
 	// Get the updated configuration from the account
 	providerConfig, err := bifrost.account.GetConfigForProvider(providerKey)
 	if err != nil {
-		return fmt.Errorf("failed to get updated config for provider %s: %v", providerKey, err)
+		return NewProviderErrorf(providerKey, "", "configuration", "failed to get updated config for provider %s: %v", providerKey, err)
+	}
+
+	// Validate configuration values
+	if err := DefaultValidator.ValidateConcurrency(providerConfig.ConcurrencyAndBufferSize.Concurrency); err != nil {
+		return NewProviderErrorf(providerKey, "", "configuration", "invalid concurrency config for provider %s: %v", providerKey, err)
+	}
+	if err := DefaultValidator.ValidateBufferSize(providerConfig.ConcurrencyAndBufferSize.BufferSize); err != nil {
+		return NewProviderErrorf(providerKey, "", "configuration", "invalid buffer size config for provider %s: %v", providerKey, err)
 	}
 
 	// Lock the provider to prevent concurrent access during update
@@ -350,19 +364,30 @@ func (bifrost *Bifrost) UpdateProviderConcurrency(providerKey schemas.ModelProvi
 	// Step 1: Create new queue with updated buffer size
 	newQueue := make(chan ChannelMessage, providerConfig.ConcurrencyAndBufferSize.BufferSize)
 
-	// Step 2: Transfer any buffered requests from old queue to new queue
+	// Step 2: Atomically replace the queue first to prevent new requests going to old queue
+	bifrost.requestQueues.Store(providerKey, newQueue)
+
+	// Step 3: Transfer any buffered requests from old queue to new queue
 	// This prevents request loss during the transition
 	transferredCount := 0
 	var transferWaitGroup sync.WaitGroup
-	for {
+
+	// Set a deadline for transfer operation to prevent indefinite blocking
+	transferDeadline := time.Now().Add(10 * time.Second)
+
+transferLoop:
+	for time.Now().Before(transferDeadline) {
 		select {
-		case msg := <-oldQueue:
+		case msg, ok := <-oldQueue:
+			if !ok {
+				// Channel was closed, no more messages
+				break transferLoop
+			}
 			select {
 			case newQueue <- msg:
 				transferredCount++
 			default:
-				// New queue is full, handle this request in a goroutine
-				// This is unlikely with proper buffer sizing but provides safety
+				// New queue is full, handle this request in a goroutine with timeout
 				transferWaitGroup.Add(1)
 				go func(m ChannelMessage) {
 					defer transferWaitGroup.Done()
@@ -385,26 +410,34 @@ func (bifrost *Bifrost) UpdateProviderConcurrency(providerKey schemas.ModelProvi
 						}
 					}
 				}(msg)
-				goto transferComplete
 			}
 		default:
-			// No more buffered messages
-			goto transferComplete
+			// No more buffered messages immediately available
+			break transferLoop
 		}
 	}
 
-transferComplete:
-	// Wait for all transfer goroutines to complete
-	transferWaitGroup.Wait()
+	// Wait for all transfer goroutines to complete with timeout
+	transferComplete := make(chan struct{})
+	go func() {
+		transferWaitGroup.Wait()
+		close(transferComplete)
+	}()
+
+	select {
+	case <-transferComplete:
+		// All transfers completed successfully
+	case <-time.After(15 * time.Second):
+		bifrost.logger.Warn("Transfer operation timed out, some requests may be lost")
+	}
+
 	if transferredCount > 0 {
 		bifrost.logger.Info(fmt.Sprintf("Transferred %d buffered requests to new queue for provider %s", transferredCount, providerKey))
 	}
 
-	// Step 3: Close the old queue to signal workers to stop
+	// Step 4: Close the old queue to signal workers to stop (after a brief delay to allow transfers)
+	time.Sleep(100 * time.Millisecond) // Brief pause to ensure all transfers are attempted
 	close(oldQueue)
-
-	// Step 4: Atomically replace the queue
-	bifrost.requestQueues.Store(providerKey, newQueue)
 
 	// Step 5: Wait for all existing workers to finish processing in-flight requests
 	waitGroup, exists := bifrost.waitGroups.Load(providerKey)
@@ -1381,8 +1414,23 @@ func (p *PluginPipeline) RunPostHooks(ctx *context.Context, resp *schemas.Bifros
 // resetPluginPipeline resets a PluginPipeline instance for reuse
 func (p *PluginPipeline) resetPluginPipeline() {
 	p.executedPreHooks = 0
-	p.preHookErrors = p.preHookErrors[:0]
-	p.postHookErrors = p.postHookErrors[:0]
+
+	// Reset slices but prevent excessive capacity growth
+	if cap(p.preHookErrors) > 32 {
+		// If capacity is too large, allocate a new slice
+		p.preHookErrors = make([]error, 0, 4)
+	} else {
+		// Otherwise, just reset length
+		p.preHookErrors = p.preHookErrors[:0]
+	}
+
+	if cap(p.postHookErrors) > 32 {
+		// If capacity is too large, allocate a new slice
+		p.postHookErrors = make([]error, 0, 4)
+	} else {
+		// Otherwise, just reset length
+		p.postHookErrors = p.postHookErrors[:0]
+	}
 }
 
 // getPluginPipeline gets a PluginPipeline from the pool and configures it
@@ -1466,6 +1514,14 @@ func (bifrost *Bifrost) releaseChannelMessage(msg *ChannelMessage) {
 // selectKeyFromProviderForModel selects an appropriate API key for a given provider and model.
 // It uses weighted random selection if multiple keys are available.
 func (bifrost *Bifrost) selectKeyFromProviderForModel(ctx *context.Context, providerKey schemas.ModelProvider, model string) (schemas.Key, error) {
+	// Validate inputs first
+	if err := DefaultValidator.ValidateModelName(model); err != nil {
+		return schemas.Key{}, NewProviderErrorf(providerKey, model, "validation", "invalid model name: %v", err)
+	}
+
+	if err := DefaultValidator.ValidateProviderName(string(providerKey)); err != nil {
+		return schemas.Key{}, NewProviderErrorf(providerKey, model, "validation", "invalid provider name: %v", err)
+	}
 	// Check if key has been set in the context explicitly
 	if ctx != nil {
 		key, ok := (*ctx).Value(schemas.BifrostContextKey).(schemas.Key)
@@ -1524,9 +1580,16 @@ func (bifrost *Bifrost) selectKeyFromProviderForModel(ctx *context.Context, prov
 		totalWeight += int(key.Weight * 100) // Convert float to int for better performance
 	}
 
-	// Use a fast random number generator
-	randomSource := rand.New(rand.NewSource(time.Now().UnixNano()))
-	randomValue := randomSource.Intn(totalWeight)
+	// Use cryptographically secure random number generation for security-sensitive key selection
+	randomBytes := make([]byte, 4)
+	if _, err := rand.Read(randomBytes); err != nil {
+		// Fallback to first key if crypto/rand fails
+		bifrost.logger.Warn(fmt.Sprintf("Failed to generate secure random number for key selection: %v, using first available key", err))
+		return supportedKeys[0], nil
+	}
+
+	// Convert bytes to int within totalWeight range
+	randomValue := int(binary.BigEndian.Uint32(randomBytes)) % totalWeight
 
 	// Select key based on weight
 	currentWeight := 0
@@ -1577,5 +1640,63 @@ func (bifrost *Bifrost) Cleanup() {
 		}
 	}
 
+	// Clean up object pools to prevent memory leaks
+	// Note: sync.Pool doesn't require explicit cleanup, but we can help GC by draining channels
+	bifrost.drainChannelPools()
+
 	bifrost.logger.Info("Graceful Cleanup Completed")
+}
+
+// drainChannelPools drains buffered channels in pools to assist garbage collection
+func (bifrost *Bifrost) drainChannelPools() {
+	// Drain response channels
+	for {
+		obj := bifrost.responseChannelPool.Get()
+		if obj == nil {
+			break
+		}
+		ch := obj.(chan *schemas.BifrostResponse)
+		// Drain any buffered messages
+		select {
+		case <-ch:
+		default:
+			// Put back and break if empty
+			bifrost.responseChannelPool.Put(ch)
+			break
+		}
+	}
+
+	// Drain error channels
+	for {
+		obj := bifrost.errorChannelPool.Get()
+		if obj == nil {
+			break
+		}
+		ch := obj.(chan schemas.BifrostError)
+		// Drain any buffered messages
+		select {
+		case <-ch:
+		default:
+			// Put back and break if empty
+			bifrost.errorChannelPool.Put(ch)
+			break
+		}
+	}
+
+	// Drain response stream channels
+	for {
+		obj := bifrost.responseStreamPool.Get()
+		if obj == nil {
+			break
+		}
+		ch := obj.(chan chan *schemas.BifrostStream)
+		// Drain any buffered messages
+		select {
+		case <-ch:
+		default:
+			// Put back and break if empty
+			bifrost.responseStreamPool.Put(ch)
+			break
+		}
+	}
 }
