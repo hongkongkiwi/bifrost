@@ -3,8 +3,10 @@ package bifrost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	schemas "github.com/maximhq/bifrost/core/schemas"
@@ -56,8 +58,7 @@ type ErrorBuilder struct {
 
 // NewErrorBuilder creates a new error builder with file location info
 func NewErrorBuilder() *ErrorBuilder {
-	_, file, line, _ := runtime.Caller(1)
-	pc, _, _, ok := runtime.Caller(1)
+	pc, file, line, ok := runtime.Caller(1)
 	var funcName string
 	if ok {
 		funcName = runtime.FuncForPC(pc).Name()
@@ -123,6 +124,24 @@ func (b *ErrorBuilder) Errorf(format string, args ...interface{}) *EnhancedError
 
 // Context-aware error helpers
 
+// Context keys for error context
+type contextKey string
+
+const (
+	requestIDKey contextKey = "request_id"
+	userIDKey    contextKey = "user_id"
+)
+
+// WithRequestID adds a request ID to the context
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDKey, requestID)
+}
+
+// WithUserID adds a user ID to the context
+func WithUserID(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, userIDKey, userID)
+}
+
 // ExtractErrorContext extracts error context from a context.Context if available
 func ExtractErrorContext(ctx context.Context) ErrorContext {
 	errorCtx := ErrorContext{
@@ -133,11 +152,11 @@ func ExtractErrorContext(ctx context.Context) ErrorContext {
 		return errorCtx
 	}
 
-	if requestID, ok := ctx.Value("request_id").(string); ok {
+	if requestID, ok := ctx.Value(requestIDKey).(string); ok {
 		errorCtx.RequestID = requestID
 	}
 
-	if userID, ok := ctx.Value("user_id").(string); ok {
+	if userID, ok := ctx.Value(userIDKey).(string); ok {
 		errorCtx.UserID = userID
 	}
 
@@ -150,8 +169,7 @@ func NewContextualError(ctx context.Context, operation string, err error) *Enhan
 	errorCtx.Operation = operation
 
 	// Get caller info
-	_, file, line, _ := runtime.Caller(1)
-	pc, _, _, ok := runtime.Caller(1)
+	pc, file, line, ok := runtime.Caller(1)
 	var funcName string
 	if ok {
 		funcName = runtime.FuncForPC(pc).Name()
@@ -251,29 +269,32 @@ func GetErrorModel(err error) string {
 // LogError logs an error with appropriate context
 func LogError(logger schemas.Logger, err error) {
 	if enhanced, ok := err.(*EnhancedError); ok {
-		errorMsg := fmt.Sprintf("[%s] Error in %s: %s (file: %s:%d, func: %s, time: %s)",
+		errorMsg := fmt.Sprintf("[%s] Error in %s: %s (file: %s:%d, time: %s)",
 			enhanced.Context.Operation,
 			enhanced.Context.Function,
 			enhanced.Err.Error(),
 			enhanced.Context.File,
 			enhanced.Context.Line,
-			enhanced.Context.Function,
 			enhanced.Context.Timestamp.Format(time.RFC3339),
 		)
-		logger.Error(fmt.Errorf("%s", errorMsg))
+		logger.Error(errors.New(errorMsg))
 
 		// Log additional context if available
+		var contextParts []string
 		if enhanced.Context.RequestID != "" {
-			logger.Debug(fmt.Sprintf("Request ID: %s", enhanced.Context.RequestID))
+			contextParts = append(contextParts, fmt.Sprintf("RequestID: %s", enhanced.Context.RequestID))
 		}
 		if enhanced.Context.UserID != "" {
-			logger.Debug(fmt.Sprintf("User ID: %s", enhanced.Context.UserID))
+			contextParts = append(contextParts, fmt.Sprintf("UserID: %s", enhanced.Context.UserID))
 		}
 		if enhanced.Context.Provider != "" {
-			logger.Debug(fmt.Sprintf("Provider: %s", enhanced.Context.Provider))
+			contextParts = append(contextParts, fmt.Sprintf("Provider: %s", enhanced.Context.Provider))
 		}
 		if enhanced.Context.Model != "" {
-			logger.Debug(fmt.Sprintf("Model: %s", enhanced.Context.Model))
+			contextParts = append(contextParts, fmt.Sprintf("Model: %s", enhanced.Context.Model))
+		}
+		if len(contextParts) > 0 {
+			logger.Debug(fmt.Sprintf("Error context: %s", strings.Join(contextParts, ", ")))
 		}
 	} else {
 		logger.Error(err)

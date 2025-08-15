@@ -268,11 +268,15 @@ func (v *InputValidator) ValidateBufferSize(bufferSize int) error {
 
 // isValidHeaderNameChar checks if a rune is valid for HTTP header names
 func isValidHeaderNameChar(r rune) bool {
-	// Based on RFC 7230 section 3.2.6
+	// Based on RFC 7230 section 3.2 - token characters
+	// token = 1*tchar
+	// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
 	return (r >= 'A' && r <= 'Z') ||
 		(r >= 'a' && r <= 'z') ||
 		(r >= '0' && r <= '9') ||
-		r == '-' || r == '_' || r == '.'
+		r == '!' || r == '#' || r == '$' || r == '%' || r == '&' ||
+		r == '\'' || r == '*' || r == '+' || r == '-' || r == '.' ||
+		r == '^' || r == '_' || r == '`' || r == '|' || r == '~'
 }
 
 // Global validator instance
