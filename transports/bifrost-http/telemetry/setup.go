@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,77 +32,78 @@ var (
 	bifrostUpstreamLatencySeconds *prometheus.HistogramVec
 
 	// customLabels stores the expected label names in order
-	customLabels  []string
-	isInitialized bool
+	customLabels    []string
+	isInitialized   bool
+	initMetricsOnce sync.Once
 )
 
 func InitPrometheusMetrics(labels []string) {
-	if isInitialized {
-		return
-	}
+	initMetricsOnce.Do(func() {
+		// Sanitize custom labels to prevent collisions with default labels
+		sanitizedLabels := sanitizeCustomLabels(labels)
+		customLabels = sanitizedLabels
 
-	customLabels = labels
+		httpDefaultLabels := []string{"path", "method", "status"}
+		bifrostDefaultLabels := []string{"target", "method"}
 
-	httpDefaultLabels := []string{"path", "method", "status"}
-	bifrostDefaultLabels := []string{"target", "method"}
+		httpRequestsTotal = promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "http_requests_total",
+				Help: "Total number of HTTP requests.",
+			},
+			append(httpDefaultLabels, sanitizedLabels...),
+		)
 
-	httpRequestsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "http_requests_total",
-			Help: "Total number of HTTP requests.",
-		},
-		append(httpDefaultLabels, labels...),
-	)
+		// httpRequestDuration tracks the duration of HTTP requests
+		httpRequestDuration = promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "http_request_duration_seconds",
+				Help:    "Duration of HTTP requests.",
+				Buckets: prometheus.DefBuckets, // Default buckets: .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10
+			},
+			append(httpDefaultLabels, sanitizedLabels...),
+		)
 
-	// httpRequestDuration tracks the duration of HTTP requests
-	httpRequestDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_request_duration_seconds",
-			Help:    "Duration of HTTP requests.",
-			Buckets: prometheus.DefBuckets, // Default buckets: .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10
-		},
-		append(httpDefaultLabels, labels...),
-	)
+		// httpRequestSizeBytes tracks the size of incoming HTTP requests
+		httpRequestSizeBytes = promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "http_request_size_bytes",
+				Help:    "Size of HTTP requests.",
+				Buckets: prometheus.ExponentialBuckets(100, 10, 8), // 100B to 1GB
+			},
+			append(httpDefaultLabels, sanitizedLabels...),
+		)
 
-	// httpRequestSizeBytes tracks the size of incoming HTTP requests
-	httpRequestSizeBytes = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_request_size_bytes",
-			Help:    "Size of HTTP requests.",
-			Buckets: prometheus.ExponentialBuckets(100, 10, 8), // 100B to 1GB
-		},
-		append(httpDefaultLabels, labels...),
-	)
+		// httpResponseSizeBytes tracks the size of outgoing HTTP responses
+		httpResponseSizeBytes = promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "http_response_size_bytes",
+				Help:    "Size of HTTP responses.",
+				Buckets: prometheus.ExponentialBuckets(100, 10, 8), // 100B to 1GB
+			},
+			append(httpDefaultLabels, sanitizedLabels...),
+		)
 
-	// httpResponseSizeBytes tracks the size of outgoing HTTP responses
-	httpResponseSizeBytes = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_response_size_bytes",
-			Help:    "Size of HTTP responses.",
-			Buckets: prometheus.ExponentialBuckets(100, 10, 8), // 100B to 1GB
-		},
-		append(httpDefaultLabels, labels...),
-	)
+		// Bifrost Upstream Metrics (Defined globally, used by PrometheusPlugin)
+		bifrostUpstreamRequestsTotal = promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "bifrost_upstream_requests_total",
+				Help: "Total number of requests forwarded to upstream providers by Bifrost.",
+			},
+			append(bifrostDefaultLabels, sanitizedLabels...),
+		)
 
-	// Bifrost Upstream Metrics (Defined globally, used by PrometheusPlugin)
-	bifrostUpstreamRequestsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "bifrost_upstream_requests_total",
-			Help: "Total number of requests forwarded to upstream providers by Bifrost.",
-		},
-		append(bifrostDefaultLabels, labels...),
-	)
+		bifrostUpstreamLatencySeconds = promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "bifrost_upstream_latency_seconds",
+				Help:    "Latency of requests forwarded to upstream providers by Bifrost.",
+				Buckets: prometheus.DefBuckets,
+			},
+			append(bifrostDefaultLabels, sanitizedLabels...),
+		)
 
-	bifrostUpstreamLatencySeconds = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "bifrost_upstream_latency_seconds",
-			Help:    "Latency of requests forwarded to upstream providers by Bifrost.",
-			Buckets: prometheus.DefBuckets,
-		},
-		append(bifrostDefaultLabels, labels...),
-	)
-
-	isInitialized = true
+		isInitialized = true
+	})
 }
 
 // getPrometheusLabelValues takes an array of expected label keys and a map of header values,
@@ -134,11 +136,12 @@ func collectPrometheusKeyValues(ctx *fasthttp.RequestCtx) map[string]string {
 
 	// Collect custom prometheus headers
 	ctx.Request.Header.VisitAll(func(key, value []byte) {
-		keyStr := strings.ToLower(string(key))
-		if strings.HasPrefix(keyStr, "x-bf-prom-") {
-			labelName := strings.TrimPrefix(keyStr, "x-bf-prom-")
+		keyStr := string(key)
+		keyLower := strings.ToLower(keyStr)
+		if strings.HasPrefix(keyLower, "x-bf-prom-") {
+			labelName := strings.TrimPrefix(keyLower, "x-bf-prom-")
 			labelValues[labelName] = string(value)
-			ctx.SetUserValue(keyStr, string(value))
+			ctx.SetUserValue(keyLower, string(value))
 		}
 	})
 
@@ -202,4 +205,25 @@ func safeObserve(histogram *prometheus.HistogramVec, value float64, labels ...st
 			metric.Observe(value)
 		}
 	}
+}
+
+// sanitizeCustomLabels removes any custom labels that conflict with default labels
+// to prevent prometheus metric registration errors.
+func sanitizeCustomLabels(labels []string) []string {
+	defaultLabels := map[string]bool{
+		"path":   true,
+		"method": true,
+		"status": true,
+		"target": true,
+	}
+
+	var sanitized []string
+	for _, label := range labels {
+		if !defaultLabels[label] {
+			sanitized = append(sanitized, label)
+		} else {
+			log.Printf("Warning: Skipping custom label '%s' as it conflicts with a default label\n", label)
+		}
+	}
+	return sanitized
 }

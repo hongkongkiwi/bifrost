@@ -45,15 +45,16 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx) *context.Context {
 
 	// Copy all prometheus header values to the new context
 	ctx.Request.Header.VisitAll(func(key, value []byte) {
-		keyStr := strings.ToLower(string(key))
+		keyStr := string(key)
+		keyLower := strings.ToLower(keyStr)
 
-		if strings.HasPrefix(keyStr, "x-bf-prom-") {
-			labelName := strings.TrimPrefix(keyStr, "x-bf-prom-")
+		if strings.HasPrefix(keyLower, "x-bf-prom-") {
+			labelName := strings.TrimPrefix(keyLower, "x-bf-prom-")
 			bifrostCtx = context.WithValue(bifrostCtx, telemetry.PrometheusContextKey(labelName), string(value))
 		}
 
-		if strings.HasPrefix(keyStr, "x-bf-maxim-") {
-			labelName := strings.TrimPrefix(keyStr, "x-bf-maxim-")
+		if strings.HasPrefix(keyLower, "x-bf-maxim-") {
+			labelName := strings.TrimPrefix(keyLower, "x-bf-maxim-")
 
 			if labelName == string(maxim.GenerationIDKey) {
 				bifrostCtx = context.WithValue(bifrostCtx, maxim.ContextKey(labelName), string(value))
