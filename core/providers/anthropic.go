@@ -281,8 +281,15 @@ func (provider *AnthropicProvider) completeRequest(ctx context.Context, requestB
 	req.SetRequestURI(url)
 	req.Header.SetMethod("POST")
 	req.Header.SetContentType("application/json")
-	req.Header.Set("x-api-key", key)
-	req.Header.Set("anthropic-version", provider.apiVersion)
+    // Choose auth header based on key format
+    // Anthropic API keys typically start with "sk-ant-".
+    // OAuth access tokens (Ultra plans) are commonly JWT-like (three segments separated by dots).
+    if isLikelyOAuthToken(key) {
+        req.Header.Set("Authorization", "Bearer "+key)
+    } else {
+        req.Header.Set("x-api-key", key)
+    }
+    req.Header.Set("anthropic-version", provider.apiVersion)
 
 	req.SetBody(jsonData)
 
@@ -796,14 +803,18 @@ func (provider *AnthropicProvider) ChatCompletionStream(ctx context.Context, pos
 		"stream":   true,
 	}, preparedParams)
 
-	// Prepare Anthropic headers
-	headers := map[string]string{
-		"Content-Type":      "application/json",
-		"x-api-key":         key.Value,
-		"anthropic-version": provider.apiVersion,
-		"Accept":            "text/event-stream",
-		"Cache-Control":     "no-cache",
-	}
+    // Prepare Anthropic headers with appropriate auth scheme
+    headers := map[string]string{
+        "Content-Type":      "application/json",
+        "anthropic-version": provider.apiVersion,
+        "Accept":            "text/event-stream",
+        "Cache-Control":     "no-cache",
+    }
+    if isLikelyOAuthToken(key.Value) {
+        headers["Authorization"] = "Bearer " + key.Value
+    } else {
+        headers["x-api-key"] = key.Value
+    }
 
 	// Use shared Anthropic streaming logic
 	return handleAnthropicStreaming(
@@ -1268,6 +1279,24 @@ func handleAnthropicStreaming(
 	}()
 
 	return responseChan, nil
+}
+
+// isLikelyOAuthToken detects if the provided key appears to be an OAuth access token (e.g., JWT).
+// Heuristic: JWTs have three base64url segments separated by dots and are typically lengthier than API keys.
+func isLikelyOAuthToken(token string) bool {
+    if token == "" {
+        return false
+    }
+    // Common Anthropic API keys start with "sk-ant-". Treat those as API keys explicitly.
+    if strings.HasPrefix(token, "sk-ant-") {
+        return false
+    }
+    // Basic JWT heuristic: exactly two dots
+    if strings.Count(token, ".") == 2 {
+        return true
+    }
+    // Fallback: long opaque bearer tokens (length threshold)
+    return len(token) > 80 && strings.Contains(token, ".")
 }
 
 func (provider *AnthropicProvider) Speech(ctx context.Context, model string, key schemas.Key, input *schemas.SpeechInput, params *schemas.ModelParameters) (*schemas.BifrostResponse, *schemas.BifrostError) {
