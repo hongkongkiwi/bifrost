@@ -26,6 +26,14 @@
         "description": "Creates a chat completion using conversational messages. Supports tool calling, image inputs, and multiple AI providers with automatic fallbacks.",
         "operationId": "createChatCompletion",
         "tags": ["Chat Completions"],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -218,6 +226,14 @@
         "description": "Creates a text completion from a prompt. Useful for text generation, summarization, and other non-conversational tasks.",
         "operationId": "createTextCompletion",
         "tags": ["Text Completions"],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1120,8 +1136,30 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "API key authentication. Use format: 'Bearer YOUR_API_KEY'"
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "JWT bearer token authentication"
+      }
     }
   },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    },
+    {
+      "BearerAuth": []
+    }
+  ],
   "tags": [
     {
       "name": "Chat Completions",
