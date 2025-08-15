@@ -149,8 +149,6 @@ func (provider *OpenAIProvider) ChatCompletion(model, key string, messages []sch
 
 	// Use the existing client configuration
 	if err := provider.client.Do(req, resp); err != nil {
-		fasthttp.ReleaseRequest(req)
-		fasthttp.ReleaseResponse(resp)
 		return nil, &schemas.BifrostError{
 			IsBifrostError: false,
 			Error: schemas.ErrorField{
