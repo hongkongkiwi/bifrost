@@ -26,18 +26,8 @@ import (
 
 // MergeConfig merges default config with custom parameters
 func MergeConfig(defaultConfig map[string]interface{}, customParams map[string]interface{}) map[string]interface{} {
-	merged := make(map[string]interface{})
-
-	// Copy default config
-	for k, v := range defaultConfig {
-		merged[k] = v
-	}
-
-	// Override with custom parameters
-	for k, v := range customParams {
-		merged[k] = v
-	}
-
+	merged := maps.Clone(defaultConfig)
+	maps.Copy(merged, customParams)
 	return merged
 }
 
@@ -78,8 +68,10 @@ func PrepareParams(params *interfaces.ModelParameters) map[string]interface{} {
 		}
 	}
 
-	// Handle ExtraParams
-	maps.Copy(flatParams, params.ExtraParams)
+	// Merge ExtraParams last so they can override structured fields when needed
+	if params.ExtraParams != nil {
+		maps.Copy(flatParams, params.ExtraParams)
+	}
 
 	return flatParams
 }

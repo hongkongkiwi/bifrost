@@ -15,12 +15,12 @@ import (
 
 // Pre-defined errors to reduce allocations in error paths
 var (
-	ErrOpenAIRequest          = fmt.Errorf("error making OpenAI request")
-	ErrOpenAIResponse         = fmt.Errorf("OpenAI error response")
-	ErrOpenAIJSONMarshaling   = fmt.Errorf("error marshaling OpenAI request")
-	ErrOpenAIDecodeStructured = fmt.Errorf("error decoding OpenAI structured response")
-	ErrOpenAIDecodeRaw        = fmt.Errorf("error decoding OpenAI raw response")
-	ErrOpenAIDecompress       = fmt.Errorf("error decompressing OpenAI response")
+	ErrOpenAIRequest          = fmt.Errorf("failed to execute HTTP request to OpenAI API")
+	ErrOpenAIResponse         = fmt.Errorf("received error response from OpenAI API")
+	ErrOpenAIJSONMarshaling   = fmt.Errorf("failed to marshal request body to JSON for OpenAI API")
+	ErrOpenAIDecodeStructured = fmt.Errorf("failed to decode OpenAI API response into structured format")
+	ErrOpenAIDecodeRaw        = fmt.Errorf("failed to decode OpenAI API response into raw format")
+	ErrOpenAIDecompress       = fmt.Errorf("failed to decompress OpenAI API response body")
 )
 
 // Counters for pool usage
@@ -66,7 +66,9 @@ var bifrostResponsePool = sync.Pool{
 func AcquireOpenAIResponse() *OpenAIResponse {
 	openAIPoolGets.Add(1)
 	resp := openAIResponsePool.Get().(*OpenAIResponse)
-	*resp = OpenAIResponse{} // Reset the struct
+	// Reset the struct more thoroughly
+	*resp = OpenAIResponse{}
+	resp.Choices = nil // Ensure slice is nil, not empty with capacity
 	return resp
 }
 
@@ -258,8 +260,8 @@ func (provider *OpenAIProvider) ChatCompletion(model, key string, messages []int
 		if mockResponse := mockOpenAIChatCompletionResponse(req, model); mockResponse != nil {
 			// Copy the mock response body to the real response
 			resp.SetBody(mockResponse)
-			// Simulate network delay
-			jitter := time.Duration(float64(1500*time.Millisecond) * (0.6 + 0.8*rand.Float64()))
+			// Simulate network delay: random delay between 900ms and 2100ms
+			jitter := time.Duration(900+rand.Int64N(1201)) * time.Millisecond
 			time.Sleep(jitter)
 			shouldMakeRealCall = false
 		} else {

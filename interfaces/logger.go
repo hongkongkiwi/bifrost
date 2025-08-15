@@ -23,4 +23,14 @@ type Logger interface {
 
 	// Error logs an error level message
 	Error(err error)
+
+	// Formatted variants for structured logging
+	Debugf(format string, args ...interface{})
+	Infof(format string, args ...interface{})
+	Warnf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+
+	// Level management
+	GetLevel() LogLevel
+	SetLevel(level LogLevel)
 }

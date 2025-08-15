@@ -24,6 +24,17 @@ type ConcurrencyAndBufferSize struct {
 	BufferSize  int `json:"buffer_size"`
 }
 
+// Validate ensures concurrency and buffer size are within acceptable ranges
+func (c *ConcurrencyAndBufferSize) Validate() error {
+	if c.Concurrency <= 0 {
+		c.Concurrency = 1 // Default to 1 if invalid
+	}
+	if c.BufferSize <= 0 {
+		c.BufferSize = 100 // Default to 100 if invalid
+	}
+	return nil
+}
+
 // ProxyType defines the type of proxy to use
 type ProxyType string
 

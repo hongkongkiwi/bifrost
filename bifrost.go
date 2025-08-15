@@ -55,6 +55,7 @@ type Bifrost struct {
 	channelMessagePool  sync.Pool // Pool for ChannelMessage objects
 	responseChannelPool sync.Pool // Pool for response channels
 	errorChannelPool    sync.Pool // Pool for error channels
+	randomSourcePool    sync.Pool // Pool for random number generators
 	logger              interfaces.Logger
 	metrics             RequestMetrics
 	metricsMutex        sync.RWMutex
@@ -150,6 +151,13 @@ func Init(config interfaces.BifrostConfig) (*Bifrost, error) {
 		New: func() interface{} {
 			bifrost.errorChannelCreations.Add(1)
 			return make(chan interfaces.BifrostError, 1)
+		},
+	}
+
+	// Initialize random source pool
+	bifrost.randomSourcePool = sync.Pool{
+		New: func() interface{} {
+			return rand.New(rand.NewSource(time.Now().UnixNano()))
 		},
 	}
 
@@ -266,8 +274,9 @@ func (bifrost *Bifrost) SelectKeyFromProviderForModel(providerKey interfaces.Sup
 		totalWeight += int(key.Weight * 100) // Convert float to int for better performance
 	}
 
-	// Use a fast random number generator
-	randomSource := rand.New(rand.NewSource(time.Now().UnixNano()))
+	// Use thread-local random source from pool for efficiency
+	randomSource := bifrost.randomSourcePool.Get().(*rand.Rand)
+	defer bifrost.randomSourcePool.Put(randomSource)
 	randomValue := randomSource.Intn(totalWeight)
 
 	// Select key based on weight
@@ -411,9 +420,6 @@ func (bifrost *Bifrost) processRequests(provider interfaces.Provider, queue chan
 
 		providerTime := time.Since(providerStart)
 
-		totalTime := time.Since(startTime)
-		bifrost.recordMetrics(queueWaitTime, keySelectTime, providerTime, 0, 0, totalTime, bifrostError == nil)
-
 		if bifrostError != nil {
 			// Add retry information to error
 			if attempts > 0 {
@@ -423,6 +429,12 @@ func (bifrost *Bifrost) processRequests(provider interfaces.Provider, queue chan
 			}
 			req.Err <- *bifrostError
 		} else {
+			// Add timing information to the response
+			if result != nil {
+				result.ExtraFields.QueueWaitTime = queueWaitTime
+				result.ExtraFields.KeySelectionTime = keySelectTime
+				result.ExtraFields.ProviderTime = providerTime
+			}
 			req.Response <- result
 		}
 	}
@@ -557,12 +569,16 @@ func (bifrost *Bifrost) TextCompletionRequest(providerKey interfaces.SupportedMo
 		}
 		pluginPostTime := time.Since(pluginPostStart)
 		totalTime := time.Since(startTime)
-		bifrost.recordMetrics(0, 0, 0, pluginPreTime, pluginPostTime, totalTime, true)
+		// Extract timing info from response
+		queueWaitTime := result.ExtraFields.QueueWaitTime
+		keySelectTime := result.ExtraFields.KeySelectionTime
+		providerTime := result.ExtraFields.ProviderTime
+		bifrost.recordMetrics(queueWaitTime, keySelectTime, providerTime, pluginPreTime, pluginPostTime, totalTime, true)
 
 	case err := <-msg.Err:
 		bifrost.releaseChannelMessage(msg)
 		totalTime := time.Since(startTime)
-		bifrost.recordMetrics(queueTime, 0, 0, pluginPreTime, 0, totalTime, false)
+		bifrost.recordMetrics(0, 0, 0, pluginPreTime, 0, totalTime, false)
 		return nil, &err
 	}
 
@@ -651,12 +667,16 @@ func (bifrost *Bifrost) ChatCompletionRequest(providerKey interfaces.SupportedMo
 		}
 		pluginPostTime := time.Since(pluginPostStart)
 		totalTime := time.Since(startTime)
-		bifrost.recordMetrics(0, 0, 0, pluginPreTime, pluginPostTime, totalTime, true)
+		// Extract timing info from response
+		queueWaitTime := result.ExtraFields.QueueWaitTime
+		keySelectTime := result.ExtraFields.KeySelectionTime
+		providerTime := result.ExtraFields.ProviderTime
+		bifrost.recordMetrics(queueWaitTime, keySelectTime, providerTime, pluginPreTime, pluginPostTime, totalTime, true)
 
 	case err := <-msg.Err:
 		bifrost.releaseChannelMessage(msg)
 		totalTime := time.Since(startTime)
-		bifrost.recordMetrics(queueTime, 0, 0, pluginPreTime, 0, totalTime, false)
+		bifrost.recordMetrics(0, 0, 0, pluginPreTime, 0, totalTime, false)
 		return nil, &err
 	}
 
@@ -686,7 +706,12 @@ func (bifrost *Bifrost) GetAllStats() map[string]interface{} {
 		"plugin_post_time":   metrics.PluginPostTime.String(),
 		"request_count":      metrics.RequestCount,
 		"error_count":        metrics.ErrorCount,
-		"error_rate":         fmt.Sprintf("%.2f%%", float64(metrics.ErrorCount)/float64(metrics.RequestCount)*100),
+		"error_rate": func() string {
+			if metrics.RequestCount == 0 {
+				return "0.00%"
+			}
+			return fmt.Sprintf("%.2f%%", float64(metrics.ErrorCount)/float64(metrics.RequestCount)*100)
+		}(),
 	}
 
 	// Add pool usage statistics

@@ -1,5 +1,9 @@
 package interfaces
 
+import (
+	"time"
+)
+
 type BifrostConfig struct {
 	Account         Account
 	Plugins         []Plugin
@@ -60,7 +64,7 @@ type ModelParameters struct {
 	StopSequences     *[]string `json:"stop_sequences,omitempty"`
 	PresencePenalty   *float64  `json:"presence_penalty,omitempty"`
 	FrequencyPenalty  *float64  `json:"frequency_penalty,omitempty"`
-	ParallelToolCalls *bool     `json:"parallel_tool_calls"`
+	ParallelToolCalls *bool     `json:"parallel_tool_calls,omitempty"`
 
 	// Dynamic parameters
 	ExtraParams map[string]interface{} `json:"-"`
@@ -103,7 +107,7 @@ type ToolChoiceFunction struct {
 
 type ToolChoice struct {
 	Type     ToolChoiceType     `json:"type"`
-	Function ToolChoiceFunction `json:"function"`
+	Function ToolChoiceFunction `json:"function,omitempty"`
 }
 
 type Message struct {
@@ -220,7 +224,11 @@ type BifrostResponseExtraFields struct {
 	Latency     *float64                        `json:"latency,omitempty"`
 	ChatHistory *[]BifrostResponseChoiceMessage `json:"chat_history,omitempty"`
 	BilledUsage *BilledLLMUsage                 `json:"billed_usage,omitempty"`
-	RawResponse interface{}                     `json:"raw_response"`
+	RawResponse interface{}                     `json:"raw_response,omitempty"`
+	// Internal timing information (not serialized)
+	QueueWaitTime    time.Duration `json:"-"`
+	KeySelectionTime time.Duration `json:"-"`
+	ProviderTime     time.Duration `json:"-"`
 }
 
 // BifrostResponse represents the complete result from a model completion
@@ -229,7 +237,7 @@ type BifrostResponse struct {
 	Object            string                     `json:"object"` // text.completion or chat.completion
 	Choices           []BifrostResponseChoice    `json:"choices"`
 	Model             string                     `json:"model"`
-	Created           int                        `json:"created"` // The Unix timestamp (in seconds).
+	Created           int64                      `json:"created"` // The Unix timestamp (in seconds).
 	ServiceTier       *string                    `json:"service_tier,omitempty"`
 	SystemFingerprint *string                    `json:"system_fingerprint,omitempty"`
 	Usage             LLMUsage                   `json:"usage"`
