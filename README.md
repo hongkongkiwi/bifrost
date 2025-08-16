@@ -345,6 +345,8 @@ The build script includes:
 
 > **Note**: The build process uses fully static linking for Linux builds to ensure maximum compatibility across different distributions. Windows builds use mingw-w64 for cross-compilation from macOS/Linux environments.
 
+**🏛️ Curious how we handle scales of 10k+ RPS?** Check out our [System Architecture Documentation](./docs/system-architecture.md) for detailed insights into Bifrost's high-performance design, memory management, and scaling strategies.
+
 ---
 
 ## 🤝 Contributing
