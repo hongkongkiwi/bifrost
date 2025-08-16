@@ -722,6 +722,8 @@ func (bifrost *Bifrost) createProviderFromProviderKey(providerKey schemas.ModelP
 		return providers.NewParasailProvider(config, bifrost.logger)
 	case schemas.Cerebras:
 		return providers.NewCerebrasProvider(config, bifrost.logger)
+	case schemas.Dashscope, schemas.Qwen:
+		return providers.NewDashscopeProvider(config, bifrost.logger), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", providerKey)
 	}

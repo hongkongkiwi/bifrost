@@ -50,6 +50,8 @@ const (
 	SGL       ModelProvider = "sgl"
 	Parasail  ModelProvider = "parasail"
 	Cerebras  ModelProvider = "cerebras"
+	Dashscope ModelProvider = "dashscope"
+	Qwen      ModelProvider = "qwen"
 )
 
 //* Request Structs
