@@ -136,7 +136,7 @@ func (v *InputValidator) ValidateAPIKey(apiKey string) error {
 	// Ensure key contains only printable ASCII characters
 	for _, r := range apiKey {
 		if !unicode.IsPrint(r) || r > 126 {
-			return fmt.Errorf("API key contains non-printable characters")
+			return fmt.Errorf("API key contains non-printable or non-ASCII characters")
 		}
 	}
 
