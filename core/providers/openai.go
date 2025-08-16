@@ -103,6 +103,11 @@ func (provider *OpenAIProvider) TextCompletion(ctx context.Context, model string
 // It supports both text and image content in messages.
 // Returns a BifrostResponse containing the completion results or an error if the request fails.
 func (provider *OpenAIProvider) ChatCompletion(ctx context.Context, model string, key schemas.Key, messages []schemas.BifrostMessage, params *schemas.ModelParameters) (*schemas.BifrostResponse, *schemas.BifrostError) {
+	// Input validation
+	if err := validateProviderInputs(model, key, messages); err != nil {
+		return nil, newBifrostOperationError("input validation failed", err, schemas.OpenAI)
+	}
+
 	formattedMessages, preparedParams := prepareOpenAIChatRequest(messages, params)
 
 	requestBody := mergeConfig(map[string]interface{}{
