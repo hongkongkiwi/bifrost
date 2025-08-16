@@ -482,6 +482,9 @@ func main() {
 	integrationHandler := handlers.NewIntegrationHandler(client, store)
 	configHandler := handlers.NewConfigHandler(client, logger, store)
 
+	// GitHub Copilot OAuth handler
+	copilotOAuthHandler := handlers.NewCopilotOAuthHandler(store, client, logger)
+
 	// Set up WebSocket callback for real-time log updates
 	if wsHandler != nil && loggingPlugin != nil {
 		loggingPlugin.SetLogCallback(wsHandler.BroadcastLogUpdate)
@@ -498,6 +501,7 @@ func main() {
 	mcpHandler.RegisterRoutes(r)
 	integrationHandler.RegisterRoutes(r)
 	configHandler.RegisterRoutes(r)
+	copilotOAuthHandler.RegisterRoutes(r)
 	if governanceHandler != nil {
 		governanceHandler.RegisterRoutes(r)
 	}
